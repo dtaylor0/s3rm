@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -27,14 +28,33 @@ func parseS3Path(path string) (bucket string, prefix string) {
 	return
 }
 
+func deleteObjects(s3client *s3.Client, output *s3.ListObjectsV2Output, bucket string) (errors []string) {
+	deleteObjects := []types.ObjectIdentifier{}
+	for _, o := range output.Contents {
+		deleteObjects = append(deleteObjects, types.ObjectIdentifier{Key: o.Key})
+	}
+	currRes, err := s3client.DeleteObjects(context.TODO(), &s3.DeleteObjectsInput{
+		Bucket: aws.String(bucket),
+		Delete: &types.Delete{
+			Objects: deleteObjects,
+		},
+	})
+	if err != nil {
+		errors = append(errors, fmt.Sprintf("Exiting delete operation: %s", err))
+	}
+
+	for _, e := range currRes.Errors {
+		errors = append(errors, fmt.Sprint(e))
+	}
+	return
+}
+
 func getKeys(s3client *s3.Client, bucket string, prefix string) {
-	log.Println("Entered")
 	var continuationToken *string
 	var wg sync.WaitGroup
-	res := [][]types.Error{}
+	res := [][]string{}
 
 	for {
-		log.Println("start")
 		output, err := s3client.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
 			Bucket:            aws.String(bucket),
 			Prefix:            aws.String(prefix),
@@ -43,25 +63,16 @@ func getKeys(s3client *s3.Client, bucket string, prefix string) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Println("called")
 
+		if len(output.Contents) == 0 {
+			log.Println("No objects to delete.")
+			return
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			deleteObjects := []types.ObjectIdentifier{}
-			for _, o := range output.Contents {
-				deleteObjects = append(deleteObjects, types.ObjectIdentifier{Key: o.Key})
-			}
-			currRes, err := s3client.DeleteObjects(context.TODO(), &s3.DeleteObjectsInput{
-				Bucket: aws.String(bucket),
-				Delete: &types.Delete{
-					Objects: deleteObjects,
-				},
-			})
-			if err != nil {
-				panic(err)
-			}
-			res = append(res, currRes.Errors)
+			deleteErrors := deleteObjects(s3client, output, bucket)
+			res = append(res, deleteErrors)
 		}()
 
 		if !*output.IsTruncated {
@@ -70,10 +81,7 @@ func getKeys(s3client *s3.Client, bucket string, prefix string) {
 		continuationToken = output.NextContinuationToken
 	}
 	wg.Wait()
-	for r := range res {
-		log.Println("In the loop")
-		log.Println(r)
-	}
+	log.Println("Errors:", res)
 }
 
 func main() {
